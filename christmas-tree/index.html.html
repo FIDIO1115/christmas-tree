@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Christmas Magic 2025</title>
+    <link href="https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        #main-title { position: absolute; top: 40px; left: 0; width: 100%; text-align: center; z-index: 50; pointer-events: none; opacity: 0; transition: all 1s ease; -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 30px rgba(255,215,0,0.6); font-size: 6rem; font-family: 'Great Vibes', cursive; background: linear-gradient(to bottom, #ffd700, #fffacd); }
+        #start-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, #001a00 0%, #000 100%); z-index: 200; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #fff; }
+        #btn-start { padding: 18px 60px; font-size: 22px; background: linear-gradient(90deg, #ffd700, #ffaa00); border: none; border-radius: 40px; color: #000; font-weight: bold; cursor: pointer; box-shadow: 0 0 40px rgba(255, 215, 0, 0.4); margin-top: 30px; }
+        #photo-modal { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.8); max-width: 80%; max-height: 80%; background: #fff; padding: 15px; box-shadow: 0 0 100px rgba(255,255,255,0.2); z-index: 150; opacity: 0; pointer-events: none; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); border-radius: 12px; }
+        #photo-modal.active { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+        #photo-modal img { max-width: 100%; max-height: 65vh; display: block; border-radius: 4px; }
+        #input_video { position: absolute; bottom: 25px; left: 25px; width: 180px; height: 135px; border-radius: 15px; border: 2px solid rgba(255,255,255,0.2); transform: scaleX(-1); z-index: 90; object-fit: cover; opacity: 0.5; }
+        .hint { position: absolute; bottom: 30px; width: 100%; text-align: center; color: rgba(255,255,255,0.6); font-size: 14px; pointer-events: none; z-index: 100; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div id="main-title">Merry Christmas</div>
+    <div id="start-screen">
+        <h1 style="font-family: 'Great Vibes'; font-size: 6rem; color: #ffd700; margin: 0;">Winter Magic</h1>
+        <button id="btn-start">開啟聖誕魔法 ✨</button>
+    </div>
+    <div class="hint">左手張開：爆炸 | 右手捏合：開啟相簿 | 右手輕輕左右平移：切換照片</div>
+    <div id="photo-modal"><img id="modal-img" src=""></div>
+    <video id="input_video"></video>
+
+    <script type="x-shader/x-vertex" id="vertexshader">
+        attribute float size; attribute vec3 customColor; attribute vec3 spherePos;
+        varying vec3 vColor;
+        uniform float uExplosion; uniform float uBeat;      
+        void main() {
+            vColor = customColor;
+            float t = uExplosion;
+            float ease = 1.0 - pow(1.0 - t, 3.0);
+            vec3 finalPos = mix(position, spherePos, ease);
+            vec4 mvPosition = modelViewMatrix * vec4(finalPos * (1.0 + uBeat * 0.12), 1.0);
+            gl_PointSize = size * (400.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentshader">
+        uniform float uBeat; varying vec3 vColor;
+        void main() {
+            vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+            if (dot(cxy, cxy) > 1.0) discard;
+            float glow = pow(1.0 - length(cxy), 2.0);
+            gl_FragColor = vec4(vColor + (uBeat * 0.2), glow);
+        }
+    </script>
+
+    <script>
+        const state = { explosion: 0.0, targetExplosion: 0.0, photoActive: false, currentIndex: 0, lastHandX: 0, swipeThreshold: 0.06, pinchLocked: false };
+        let scene, camera, renderer, clock, treeGroup, particleSystem, photoMeshes = [], loadedImages = [];
+        let audioCtx, analyser, dataArray, audioEl;
+
+        function createCircularTexture(img) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const size = 512;
+            canvas.width = size; canvas.height = size;
+            ctx.beginPath(); ctx.arc(size/2, size/2, size/2, 0, Math.PI * 2); ctx.clip();
+            const aspect = img.width / img.height;
+            let nw, nh, nx, ny;
+            if (aspect > 1) { nh = size; nw = size * aspect; ny = 0; nx = -(nw - size) / 2; }
+            else { nw = size; nh = size / aspect; nx = 0; ny = -(nh - size) / 2; }
+            ctx.drawImage(img, nx, ny, nw, nh);
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        async function autoLoadImages() {
+            const total = 21;
+            let loadedCount = 0;
+            for (let i = 1; i <= total; i++) {
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.onload = () => {
+                    loadedImages[i-1] = img;
+                    loadedCount++;
+                    if (loadedCount === total) updatePhotos();
+                };
+                img.onerror = () => {
+                    // 自動嘗試大寫 .JPG 解決大小寫問題
+                    if (!img.src.includes(".JPG")) {
+                        img.src = `${i}.JPG`;
+                    } else {
+                        loadedCount++;
+                        if (loadedCount === total) updatePhotos();
+                    }
+                };
+                img.src = `${i}.jpg`;
+            }
+        }
+
+        document.getElementById('btn-start').addEventListener('click', () => {
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('main-title').style.opacity = 1;
+            initAudio(); initThree(); startHandTracking(); autoLoadImages();
+        });
+
+        function initAudio() {
+            audioEl = new Audio("https://thirdparty.gtimg.com/C1000007bNrR1HXkjD.m4a?fromtag=38");
+            audioEl.loop = true; audioEl.crossOrigin = "anonymous";
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioCtx.createAnalyser();
+            const source = audioCtx.createMediaElementSource(audioEl);
+            source.connect(analyser); analyser.connect(audioCtx.destination);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            audioEl.play();
+        }
+
+        function initThree() {
+            clock = new THREE.Clock(); scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 30, 90);
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            treeGroup = new THREE.Group(); scene.add(treeGroup);
+            createParticles(); animate();
+        }
+
+        function createParticles() {
+            const count = 18000; const geo = new THREE.BufferGeometry();
+            const pos = [], sph = [], col = [], siz = [];
+            const colorHelper = new THREE.Color();
+            for(let i=0; i<count; i++) {
+                const y = (i/count) * 75; const r = (1 - y/75) * 30 * Math.sqrt(Math.random()); const a = i * 0.22;
+                pos.push(Math.cos(a)*r, y - 10, Math.sin(a)*r);
+                const v = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize().multiplyScalar(65);
+                sph.push(v.x, v.y + 25, v.z);
+                const rand = Math.random();
+                if(rand > 0.9) colorHelper.setHex(0xffd700); 
+                else if(rand > 0.8) colorHelper.setHex(0xffffff);
+                else colorHelper.setHex(0x228b22);
+                col.push(colorHelper.r, colorHelper.g, colorHelper.b);
+                siz.push(Math.random() * 2 + 1.5);
+            }
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            geo.setAttribute('spherePos', new THREE.Float32BufferAttribute(sph, 3));
+            geo.setAttribute('customColor', new THREE.Float32BufferAttribute(col, 3));
+            geo.setAttribute('size', new THREE.Float32BufferAttribute(siz, 1));
+            particleSystem = new THREE.Points(geo, new THREE.ShaderMaterial({
+                uniforms: { uExplosion: { value: 0 }, uBeat: { value: 0 } },
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending, transparent: true, depthTest: false
+            }));
+            treeGroup.add(particleSystem);
+        }
+
+        function updatePhotos() {
+            photoMeshes.forEach(p => treeGroup.remove(p)); photoMeshes = [];
+            for(let i=0; i<21; i++) {
+                if(!loadedImages[i]) continue;
+                const tex = createCircularTexture(loadedImages[i]);
+                const mesh = new THREE.Mesh(new THREE.SphereGeometry(3, 32, 32), new THREE.MeshBasicMaterial({ map: tex }));
+                const y = Math.random() * 65; const r = (1 - y/75) * 32 + 2; const a = Math.random() * Math.PI * 2;
+                mesh.position.set(Math.cos(a)*r, y-10, Math.sin(a)*r);
+                treeGroup.add(mesh); photoMeshes.push(mesh);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(analyser) { analyser.getByteFrequencyData(dataArray); particleSystem.material.uniforms.uBeat.value = dataArray[10]/255; }
+            state.explosion += (state.targetExplosion - state.explosion) * 0.1;
+            particleSystem.material.uniforms.uExplosion.value = state.explosion;
+            treeGroup.rotation.y += 0.005;
+            photoMeshes.forEach(p => p.lookAt(camera.position));
+            renderer.render(scene, camera);
+        }
+
+        function startHandTracking() {
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.75 });
+            hands.onResults(results => {
+                let leftIn = false;
+                if (results.multiHandLandmarks) {
+                    results.multiHandLandmarks.forEach((lm, index) => {
+                        const label = results.multiHandedness[index].label;
+                        if (label === 'Left') {
+                            const d = Math.hypot(lm[8].x - lm[20].x, lm[8].y - lm[20].y);
+                            state.targetExplosion = d > 0.45 ? 1 : 0; leftIn = true;
+                        } else {
+                            const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+                            if (pinch < 0.045) {
+                                if (!state.pinchLocked) {
+                                    state.photoActive = !state.photoActive;
+                                    if(state.photoActive) {
+                                        state.currentIndex = Math.floor(Math.random() * 21);
+                                        updateModal();
+                                    } else { document.getElementById('photo-modal').classList.remove('active'); }
+                                    state.pinchLocked = true;
+                                }
+                            } else { state.pinchLocked = false; }
+
+                            if (state.photoActive) {
+                                let diff = lm[9].x - state.lastHandX;
+                                if (Math.abs(diff) > state.swipeThreshold) {
+                                    state.currentIndex = diff > 0 ? (state.currentIndex + 1) % 21 : (state.currentIndex + 20) % 21;
+                                    updateModal(); state.lastHandX = lm[9].x; 
+                                }
+                            }
+                            state.lastHandX = lm[9].x;
+                        }
+                    });
+                }
+                if(!leftIn) state.targetExplosion = 0;
+            });
+            new Camera(document.getElementById('input_video'), { onFrame: async () => { await hands.send({image: document.getElementById('input_video')}); }, width: 320, height: 240 }).start();
+        }
+
+        function updateModal() {
+            if(loadedImages[state.currentIndex]) {
+                document.getElementById('modal-img').src = loadedImages[state.currentIndex].src;
+                document.getElementById('photo-modal').classList.add('active');
+            }
+        }
+    </script>
+</body>
+</html>
